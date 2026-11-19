@@ -23,8 +23,6 @@ from requests.sessions import Session
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-from useragents import get_random_ua
-
 
 # ═══════════════════════════════════════════════════════════════
 # 1. INDOSAKU — AES-128-ECB
@@ -61,8 +59,7 @@ def _is_decrypt(text: str) -> dict:
 
 def handler_indosaku(phone: str, session: Session) -> requests.Response:
     h = dict(_IS_HEADERS)
-    h["b9uMD"]        = os.urandom(8).hex()
-    h["User-Agent"]   = get_random_ua()
+    h["b9uMD"] = os.urandom(8).hex()
     session.headers.update(h)
     payload = {
         "cVWzn1Oq"  : 1,
@@ -139,9 +136,7 @@ def _rc_encrypt(data: dict, uid: str) -> str:
 
 
 def handler_rupiahcepat(phone: str, session: Session) -> requests.Response:
-    h = dict(_RC_HEADERS)
-    h["User-Agent"] = get_random_ua()
-    session.headers.update(h)
+    session.headers.update(_RC_HEADERS)
     uid  = _rc_uuid()
     data = {"mobile": phone, "sms_type": "8", "otp_channel": "2"}
     return session.post(_RC_BASE + _RC_PATH, data="data=" + _rc_encrypt(data, uid), timeout=30)
@@ -167,7 +162,7 @@ _CAIRIN_IMEI = "352365091234567"
 
 
 def handler_cairin(phone: str, session: Session) -> requests.Response:
-    session.headers.update({"User-Agent": get_random_ua()})
+    session.headers.update({"User-Agent": _CAIRIN_UA})
     return session.post(
         "https://app.cairin.id/v1/app/sms/sendCaptcha",
         data={
