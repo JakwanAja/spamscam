@@ -40,12 +40,41 @@ Masukkan nomor target (format `08xxxxxxxxxx`) dan jumlah siklus.
 spamscam/
 ├── main.py          — Entry point & CLI
 ├── engine.py        — Dispatcher paralel (ThreadPoolExecutor)
-├── handlers.py      — Handler custom (enkripsi AES, form-data)
-├── targets.py       — Daftar provider & konfigurasi endpoint
+├── providers.py     — Semua provider: definisi + logika request dalam satu file
 ├── utils.py         — Format nomor, placeholder resolver, get_public_ip
 ├── useragents.py    — Pool 20 User-Agent untuk rotasi per request
 └── requirements.txt
 ```
+
+## Cara menambah provider baru
+
+Buka `providers.py`, tambahkan satu blok `Provider(...)` di bagian bawah daftar `PROVIDERS`.
+
+**Provider JSON sederhana** (tidak butuh enkripsi):
+```python
+Provider(
+    name       = "NamaProvider",
+    url        = "https://api.namaprovider.com/v1/otp/send",
+    payload    = '{"phone":"{number}","type":"register"}',
+    headers    = {"Content-Type": "application/json"},
+    number_fmt = fmt_08,
+    success_on = ['"status":"ok"'],
+),
+```
+
+**Provider dengan logika khusus** (enkripsi, signature, dsb):
+```python
+def _send_namaprovider(phone, session): ...
+def _check_namaprovider(response): ...
+
+Provider(
+    name     = "NamaProvider",
+    send_fn  = _send_namaprovider,
+    check_fn = _check_namaprovider,
+),
+```
+
+Tidak perlu menyentuh file lain.
 
 ## Dependensi
 

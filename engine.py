@@ -1,6 +1,6 @@
 """
 engine.py — Concurrent dispatcher.
-Menjalankan semua target secara paralel dan melaporkan hasil real-time.
+Menjalankan semua provider secara paralel dan melaporkan hasil real-time.
 """
 from __future__ import annotations
 
@@ -8,19 +8,19 @@ import json
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterator
 
 import requests
 from requests.sessions import Session
 
-from handlers import REGISTRY
+from providers import Provider, PROVIDERS
 from useragents import get_random_ua
 from utils import resolve_payload
 
 
 # ─────────────────────────────────────────────────────────────
-# Keyword rate limit yang umum di response body
+# Rate limit keywords
 # ─────────────────────────────────────────────────────────────
 
 _RATE_LIMIT_KEYWORDS = [
@@ -30,7 +30,7 @@ _RATE_LIMIT_KEYWORDS = [
 
 
 # ─────────────────────────────────────────────────────────────
-# Result dataclass
+# Result
 # ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -39,11 +39,11 @@ class Result:
     ok      : bool
     status  : int  = 0
     detail  : str  = ""
-    limited : bool = False   # True jika kena rate limit (HTTP 429 atau keyword)
+    limited : bool = False
 
 
 # ─────────────────────────────────────────────────────────────
-# Rate limit detection
+# Helpers
 # ─────────────────────────────────────────────────────────────
 
 def _is_rate_limited(status: int, text: str) -> bool:
@@ -53,104 +53,79 @@ def _is_rate_limited(status: int, text: str) -> bool:
     return any(kw in text_lower for kw in _RATE_LIMIT_KEYWORDS)
 
 
-# ─────────────────────────────────────────────────────────────
-# Success checker generik (string matching)
-# ─────────────────────────────────────────────────────────────
-
 def _check_success_on(text: str, success_on: list[str]) -> bool:
-    """Return True jika salah satu string di success_on ada di response text."""
     if not success_on:
         return False
     text_lower = text.lower()
-    for pattern in success_on:
-        if re.search(pattern.lower(), text_lower):
-            return True
-    return False
+    return any(re.search(p.lower(), text_lower) for p in success_on)
 
 
 # ─────────────────────────────────────────────────────────────
-# Dispatch satu target
+# Dispatch satu provider
 # ─────────────────────────────────────────────────────────────
 
-def _dispatch_json(phone_fmt: str, phone_raw: str, target: dict) -> requests.Response:
-    """Kirim request untuk target bertipe 'json'."""
-    headers = dict(target.get("headers", {}))
-
-    # Resolve placeholder di nilai header (mis. x-device: {rand})
-    for k, v in headers.items():
-        if isinstance(v, str) and "{" in v:
-            headers[k] = resolve_payload(v, phone_fmt, phone_raw)
-
-    # Tambah header standar dengan UA acak
-    headers.setdefault("User-Agent", get_random_ua())
-    headers.setdefault("Accept", "application/json, text/plain, */*")
-
-    if target.get("referer"):
-        headers.setdefault("Referer", target["referer"])
-
-    # Resolve payload
-    raw_payload = resolve_payload(target["payload"], phone_fmt, phone_raw)
-    content_type = headers.get("Content-Type", "application/json")
-
-    s = Session()
-    s.headers.update(headers)
-    timeout = target.get("timeout", 15)
-
-    if content_type.startswith("application/json"):
-        return s.post(target["url"], json=json.loads(raw_payload), timeout=timeout)
-    else:
-        return s.post(target["url"], data=raw_payload.encode(), timeout=timeout)
-
-
-def _send_one(phone: str, target: dict, stop_flag: threading.Event) -> Result:
-    """Kirim OTP ke satu target, kembalikan Result."""
-    name = target["name"]
-
+def _send_one(phone: str, provider: Provider,
+              stop_flag: threading.Event) -> Result:
     if stop_flag.is_set():
-        return Result(name=name, ok=False, status=0, detail="Dibatalkan")
+        return Result(name=provider.name, ok=False, detail="Dibatalkan")
 
+    name = provider.name
     try:
-        phone_fmt  = target["number_fmt"](phone)
-        phone_raw  = phone.lstrip("0")
-        post_type  = target["post_type"]
-        success_on = target.get("success_on", [])
+        phone_fmt = provider.number_fmt(phone)
+        phone_raw = phone.lstrip("0")
 
-        if post_type == "json":
-            response = _dispatch_json(phone_fmt, phone_raw, target)
-        else:
-            # Custom handler
-            if post_type not in REGISTRY:
-                return Result(name=name, ok=False, status=0,
-                              detail=f"handler '{post_type}' tidak ditemukan")
-            handler_fn, check_fn = REGISTRY[post_type]
+        # ── Mode custom (send_fn didefinisikan) ───────────────
+        if provider.send_fn is not None:
             s = Session()
-            # Pasang UA acak ke session sebelum handler pakai
             s.headers.update({"User-Agent": get_random_ua()})
-            response = handler_fn(phone_fmt, s)
+            response = provider.send_fn(phone_fmt, s)
 
-            # Rate limit check sebelum custom check_fn
             if _is_rate_limited(response.status_code, response.text):
                 return Result(name=name, ok=False, status=response.status_code,
                               detail="Rate limited", limited=True)
 
-            # Custom check function jika ada
-            if check_fn is not None:
-                ok = check_fn(response)
-                return Result(name=name, ok=ok, status=response.status_code,
-                              detail=response.text[:80])
+            if provider.check_fn is not None:
+                ok = provider.check_fn(response)
+            else:
+                ok = (200 <= response.status_code < 300 and
+                      _check_success_on(response.text, provider.success_on))
 
-        # Generic success check
+            return Result(name=name, ok=ok, status=response.status_code,
+                          detail=response.text[:80])
+
+        # ── Mode JSON generik ─────────────────────────────────
+        headers = dict(provider.headers)
+        for k, v in headers.items():
+            if isinstance(v, str) and "{" in v:
+                headers[k] = resolve_payload(v, phone_fmt, phone_raw)
+
+        headers.setdefault("User-Agent", get_random_ua())
+        headers.setdefault("Accept", "application/json, text/plain, */*")
+        if provider.referer:
+            headers.setdefault("Referer", provider.referer)
+
+        raw_payload  = resolve_payload(provider.payload, phone_fmt, phone_raw)
+        content_type = headers.get("Content-Type", "application/json")
+
+        s = Session()
+        s.headers.update(headers)
+
+        if content_type.startswith("application/json"):
+            response = s.post(provider.url, json=json.loads(raw_payload),
+                              timeout=provider.timeout)
+        else:
+            response = s.post(provider.url, data=raw_payload.encode(),
+                              timeout=provider.timeout)
+
         status = response.status_code
         body   = response.text
 
-        # Rate limit detection dulu
         if _is_rate_limited(status, body):
             return Result(name=name, ok=False, status=status,
                           detail="Rate limited", limited=True)
 
-        # 2xx = kemungkinan sukses
         if 200 <= status < 300:
-            ok = _check_success_on(body, success_on) if success_on else True
+            ok = _check_success_on(body, provider.success_on) if provider.success_on else True
         else:
             ok = False
 
@@ -168,24 +143,25 @@ def _send_one(phone: str, target: dict, stop_flag: threading.Event) -> Result:
 # Public API
 # ─────────────────────────────────────────────────────────────
 
-def send_all(phone: str, targets: list[dict],
+def send_all(phone: str,
+             providers: list[Provider] | None = None,
              max_workers: int = 12,
              stop_flag: threading.Event | None = None) -> Iterator[Result]:
     """
-    Kirim OTP ke semua target secara paralel.
+    Kirim OTP ke semua provider secara paralel.
     Yield Result satu per satu sesuai urutan selesai.
-
-    stop_flag: threading.Event — set() untuk hentikan semua worker.
     """
+    if providers is None:
+        providers = PROVIDERS
     if stop_flag is None:
         stop_flag = threading.Event()
 
-    enabled = [t for t in targets if t.get("enabled", True)]
+    active = [p for p in providers if p.enabled]
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_send_one, phone, t, stop_flag): t
-            for t in enabled
+            pool.submit(_send_one, phone, p, stop_flag): p
+            for p in active
         }
         for future in as_completed(futures):
             if stop_flag.is_set():
@@ -195,5 +171,5 @@ def send_all(phone: str, targets: list[dict],
             try:
                 yield future.result()
             except Exception as e:
-                name = futures[future]["name"]
-                yield Result(name=name, ok=False, status=0, detail=str(e)[:80])
+                name = futures[future].name
+                yield Result(name=name, ok=False, detail=str(e)[:80])

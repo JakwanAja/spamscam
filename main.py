@@ -15,7 +15,7 @@ from rich.text import Text
 from rich.theme import Theme
 
 from engine import Result, send_all
-from targets import TARGETS
+from providers import PROVIDERS
 from utils import normalize, get_public_ip
 
 # ─────────────────────────────────────────────────────────────
@@ -50,7 +50,7 @@ def print_banner() -> None:
     console.print()
     console.print("SPAMSCAM v2  /  OTP SPAM TOOL", style="bold")
     console.print(
-        f"Data-driven · Paralel · {sum(1 for t in TARGETS if t.get('enabled', True))} provider aktif",
+        f"Data-driven · Paralel · {sum(1 for p in PROVIDERS if p.enabled)} provider aktif",
         style="muted",
     )
     console.print()
@@ -127,7 +127,7 @@ def run_cycle(phone: str, cycle: int, total: int,
     results: list[Result] = []
     col_w = 22
 
-    for result in send_all(phone, TARGETS, stop_flag=stop_flag):
+    for result in send_all(phone, PROVIDERS, stop_flag=stop_flag):
         results.append(result)
         label = f"  {result.name}"
         if result.ok:
